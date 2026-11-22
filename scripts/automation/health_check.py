@@ -20,6 +20,8 @@ MAX_RUN_AGE_MINUTES = 20
 MAX_JOB_AGE_MINUTES = 12
 MAX_SCHEDULE_AGE_HOURS = 8
 MAX_ACTIVE_RUNS_TO_INSPECT = 10
+PAGE_SIZE = 100
+MAX_RUN_PAGES = 5
 
 
 def parse_timestamp(value: str | None) -> datetime | None:
@@ -41,13 +43,63 @@ def _age_seconds(value: str | None, now: datetime) -> float | None:
     return max(0.0, (now - parsed).total_seconds())
 
 
+def collect_infrastructure_runs(base_url: str, token: str) -> tuple[list[dict], list[str], bool]:
+    """Fetch runs by workflow ID so unrelated high-volume workflows cannot hide them.
+
+    Pagination is deliberately bounded. If the bound is reached, the caller
+    marks the health result degraded instead of silently claiming full coverage.
+    """
+    workflow_payload = github_get_json(
+        f"{base_url}/actions/workflows?per_page={PAGE_SIZE}", token
+    )
+    workflows = workflow_payload.get("workflows", [])
+    if not isinstance(workflows, list):
+        raise RuntimeError("invalid_workflow_response")
+
+    workflow_ids: dict[str, int] = {}
+    for workflow in workflows:
+        if workflow.get("name") not in INFRA_NAMES or workflow.get("state") != "active":
+            continue
+        workflow_id = workflow.get("id")
+        if isinstance(workflow_id, int) and workflow_id > 0:
+            workflow_ids[workflow["name"]] = workflow_id
+
+    missing_workflows = sorted(INFRA_NAMES - workflow_ids.keys())
+    history_truncated = workflow_payload.get("total_count", len(workflows)) > len(workflows)
+    runs: list[dict] = []
+
+    for workflow_name in sorted(INFRA_NAMES):
+        workflow_id = workflow_ids.get(workflow_name)
+        if workflow_id is None:
+            continue
+        for page in range(1, MAX_RUN_PAGES + 1):
+            payload = github_get_json(
+                f"{base_url}/actions/workflows/{workflow_id}/runs"
+                f"?per_page={PAGE_SIZE}&page={page}",
+                token,
+            )
+            page_runs = payload.get("workflow_runs", [])
+            if not isinstance(page_runs, list):
+                raise RuntimeError("invalid_workflow_runs_response")
+            runs.extend(run for run in page_runs if run.get("name") == workflow_name)
+            if len(page_runs) < PAGE_SIZE:
+                break
+            if page == MAX_RUN_PAGES:
+                history_truncated = True
+
+    return runs, missing_workflows, history_truncated
+
+
 def assess_health(
     runs: list[dict],
     jobs_by_run: dict[str, list[dict]],
     current_run_id: str,
     now: datetime | None = None,
+    missing_workflows: list[str] | None = None,
+    history_truncated: bool = False,
 ) -> dict:
     now = now or datetime.now(timezone.utc)
+    missing_workflows = missing_workflows or []
     relevant = [
         run for run in runs
         if run.get("name") in INFRA_NAMES
@@ -59,11 +111,17 @@ def assess_health(
     stale_jobs = 0
     stale_queued_jobs = 0
 
-    active = sorted(
-        (run for run in relevant if run.get("status") == "in_progress"),
-        key=lambda run: run.get("created_at", ""),
-        reverse=True,
-    )[:MAX_ACTIVE_RUNS_TO_INSPECT]
+    active: list[dict] = []
+    for workflow_name in INFRA_NAMES:
+        workflow_active = sorted(
+            (
+                run for run in relevant
+                if run.get("name") == workflow_name and run.get("status") == "in_progress"
+            ),
+            key=lambda run: run.get("created_at", ""),
+            reverse=True,
+        )
+        active.extend(workflow_active[:MAX_ACTIVE_RUNS_TO_INSPECT])
 
     for run in relevant:
         status = run.get("status")
@@ -103,7 +161,10 @@ def assess_health(
             successful_schedules,
             key=lambda run: run.get("run_started_at") or run.get("created_at") or "",
         )
-        age = _age_seconds(last_success.get("run_started_at") or last_success.get("created_at"), now)
+        age = _age_seconds(
+            last_success.get("run_started_at") or last_success.get("created_at"),
+            now,
+        )
         if age is not None:
             last_schedule_age_hours = round(age / 3600, 2)
 
@@ -133,12 +194,21 @@ def assess_health(
         else:
             schedule_state = "failed"
 
+        # A new pending/running attempt must not mask an already stale last success.
+        if schedule_state in {"pending", "running"}:
+            if last_schedule_age_hours is None:
+                schedule_state = "bootstrap_pending"
+            elif last_schedule_age_hours > MAX_SCHEDULE_AGE_HOURS:
+                schedule_state = "stale"
+
     degraded = (
         stale_queued > 0
         or stale_running > 0
         or stale_jobs > 0
         or stale_queued_jobs > 0
         or schedule_state in {"stale", "unknown", "failed"}
+        or bool(missing_workflows)
+        or history_truncated
     )
     if degraded:
         status = "degraded"
@@ -156,6 +226,8 @@ def assess_health(
         "stale_queued_jobs": stale_queued_jobs,
         "schedule_freshness": schedule_state,
         "last_successful_schedule_age_hours": last_schedule_age_hours,
+        "missing_infrastructure_workflows": len(missing_workflows),
+        "history_truncated": history_truncated,
     }
 
 
@@ -191,21 +263,23 @@ def main() -> int:
 
     base_url = f"https://api.github.com/repos/{repo}"
     try:
-        payload = github_get_json(f"{base_url}/actions/runs?per_page=100", token)
-        runs = payload.get("workflow_runs", [])
-        if not isinstance(runs, list):
-            raise RuntimeError("invalid_api_response")
+        runs, missing_workflows, history_truncated = collect_infrastructure_runs(
+            base_url, token
+        )
 
-        active_runs = sorted(
-            (
-                run for run in runs
-                if run.get("name") in INFRA_NAMES
-                and run.get("status") == "in_progress"
-                and str(run.get("id", "")) != current_run_id
-            ),
-            key=lambda run: run.get("created_at", ""),
-            reverse=True,
-        )[:MAX_ACTIVE_RUNS_TO_INSPECT]
+        active_runs: list[dict] = []
+        for workflow_name in INFRA_NAMES:
+            workflow_active = sorted(
+                (
+                    run for run in runs
+                    if run.get("name") == workflow_name
+                    and run.get("status") == "in_progress"
+                    and str(run.get("id", "")) != current_run_id
+                ),
+                key=lambda run: run.get("created_at", ""),
+                reverse=True,
+            )
+            active_runs.extend(workflow_active[:MAX_ACTIVE_RUNS_TO_INSPECT])
 
         jobs_by_run: dict[str, list[dict]] = {}
         for run in active_runs:
@@ -221,6 +295,8 @@ def main() -> int:
             jobs_by_run,
             current_run_id,
             datetime.now(timezone.utc),
+            missing_workflows,
+            history_truncated,
         )
     except Exception:
         print(json.dumps({"status": "error", "reason": "github_api_unavailable"}))
