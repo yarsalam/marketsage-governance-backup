@@ -1,36 +1,39 @@
 # راهنمای اپراتوری زیرساخت خودکار MarketSage
 
-## وضعیت این نسخه — ۲۰۲۶-۱۱-۲۱
+## وضعیت این نسخه — ۲۰۲۶-۱۱-۲۲
 
 این نسخهٔ اصلاح‌شده بر آخرین main موجود در زمان ممیزی ساخته شده و برای بازبینی انسانی در یک PR مستقل Draft ارائه می‌شود. هیچ Merge، Deploy یا تغییر تنظیمات حساب در این مرحله انجام نمی‌شود.
 
-- آخرین main در زمان ساخت: `2d321a46ae8d83a4b1cbea5c647590326c16365f`.
-- مخزن در API رسمی GitHub دارای Visibility برابر `public` است؛ خصوصی‌بودن تأیید نشده و تغییر Visibility خارج از این PR است.
-- درخت main فاقد `.github/workflows` بود؛ بنابراین Workflowهای این PR تا Merge انسانی روی شاخهٔ پیش‌فرض فعال نیستند.
-- PRهای باز قابل مشاهده: #1 (خط لولهٔ داده، Draft)، #2 (نسخهٔ اولیهٔ زیرساخت، Draft)، #3 (ممیزی منبع، Draft). کار روی PRهای داده تا پذیرش Goal 1 متوقف است.
-- PR #2 نسبت به main فعلی Diverged و غیرقابل ادغام گزارش شده است؛ این نسخهٔ اصلاح‌شده جایگزین پیشنهادی آن است. PR #2 را Merge نکنید.
-- آخرین دو اجرای Infrastructure CI روی HEAD نسخهٔ اولیه موفق بودند، اما هیچ اجرای Schedule یا Recovery مشاهده نشد؛ آن‌ها شواهد پذیرش عملیاتی نیستند.
-- API شاخهٔ main مقدار `protected=false` برگرداند و Rulesets فهرست‌شده صفر بود. خواندن جزئیات Branch Protection به‌علت محدودیت مجوز اتصال ممکن نشد؛ مالک باید تنظیمات را در GitHub تأیید کند.
+- آخرین main در زمان ساخت: \`2d321a46ae8d83a4b1cbea5c647590326c16365f\`.
+- مخزن در API رسمی GitHub دارای Visibility برابر \`public\` است؛ خصوصی‌بودن تأیید نشده و تغییر Visibility خارج از این PR است.
+- درخت main فاقد \`.github/workflows\` است؛ بنابراین Workflowهای این PR تا Merge انسانی روی شاخهٔ پیش‌فرض فعال نیستند.
+- PRهای باز قابل مشاهده: #1 و #3 مربوط به کار داده و باید Draft/متوقف بمانند؛ #2 نسخهٔ اولیهٔ زیرساخت است و نسبت به main فعلی Diverged و غیرقابل ادغام است؛ #4 نسخهٔ اصلاح‌شده و PR جاری زیرساخت است.
+- PR #2 را Merge نکنید.
+- CI روی HEAD فعلی PR #4 با اجرای Push و Pull Request موفق شده است؛ این شواهد فقط CI را ثابت می‌کنند. هیچ Schedule یا Recovery واقعی مشاهده نشده است.
+- API شاخهٔ main مقدار \`protected=false\` و فهرست Rulesets خالی برگرداند. جزئیات Branch Protection از اتصال فعلی قابل تغییر نیست؛ مالک باید تنظیمات را در GitHub بازبینی کند.
 - Secrets inventory و Runner Registry از اتصال فعلی قابل مشاهده نیستند؛ هیچ Secret یا مقدار محرمانه‌ای خوانده نشده است.
 
 ## معماری
 
-1. **Event-driven CI:** هر Push به `main` یا شاخه‌های `infra/**` و هر Pull Request به `main` فقط آزمون‌های زیرساخت را اجرا می‌کند. Path filter عمداً حذف شده تا Check روی PRهای بدون تغییر فایل زیرساخت نیز گزارش شود و بتواند بعداً Required Check پایدار باشد.
+1. **Event-driven CI:** هر Push به \`main\` یا شاخه‌های \`infra/**\` و هر Pull Request به \`main\` فقط آزمون‌های زیرساخت را اجرا می‌کند. Path filter عمداً حذف شده تا Check روی همهٔ PRهای main گزارش شود.
 2. **Scheduled Watchdog:** هر شش ساعت روی شاخهٔ پیش‌فرض اجرا می‌شود و وضعیت اجراهای زیرساخت، صف‌های قدیمی، Jobهای گیرکرده، آخرین تلاش Schedule و آخرین Schedule موفق را با API فقط‌خواندنی بررسی می‌کند.
-3. **Bounded Recovery:** فقط دو Workflow مشخص را، برای شاخه‌های همین مخزن، در صورت شکست/Timeout و فقط در تلاش اول، یک بار retry می‌کند. همهٔ Recoveryها در یک گروه concurrency صف‌بندی می‌شوند تا Retryهای هم‌زمان به API فشار نیاورند.
-4. **Timeout و concurrency:** CI ده دقیقه، Watchdog هشت دقیقه و Recovery سه دقیقه سقف اجرا دارند. CI قدیمی همان ref لغو می‌شود؛ Watchdog و Recovery صف محدود GitHub را استفاده می‌کنند و اجرای فعال را لغو نمی‌کنند.
-5. **گزارش پاک‌سازی‌شده:** فقط وضعیت کلی و شمارنده‌ها ثبت می‌شود. هیچ payload، داده بازار، فایل محلی، Token، Secret یا Artifact بارگذاری نمی‌شود.
-6. **Human handoff:** صف بیش از ۲۰ دقیقه، اجرای بیش از ۲۰ دقیقه، Job فعال بیش از ۱۲ دقیقه، Job صف‌شدهٔ کهنه یا آخرین Schedule ناموفق/قدیمی باعث وضعیت degraded و شکست کنترل‌شدهٔ Watchdog می‌شود.
+3. **Workflow-scoped monitoring:** ابتدا فهرست Workflowها خوانده می‌شود؛ سپس اجراها جداگانه بر اساس شناسهٔ هر Workflow دریافت می‌شوند. این کار مانع پنهان‌شدن اجراهای زیرساخت پشت ۱۰۰ اجرای اخیر Workflowهای نامرتبط می‌شود.
+4. **Bounded pagination:** برای هر Workflow حداکثر پنج صفحهٔ ۱۰۰تایی بررسی می‌شود. اگر تاریخچه در این سقف ناقص بماند، وضعیت degraded گزارش می‌شود؛ سیستم در آن حالت سلامت کامل اعلام نمی‌کند.
+5. **Schedule freshness:** یک Schedule جدید در حالت pending/running نمی‌تواند موفقیت قدیمی‌تر از هشت ساعت را سالم جلوه دهد. نخستین اجرای Schedule تا ثبت موفقیت، \`bootstrap_pending\` است.
+6. **Bounded Recovery:** فقط دو Workflow مشخص را، برای شاخه‌های همین مخزن، در صورت شکست/Timeout و فقط در تلاش اول، یک بار retry می‌کند. همهٔ Recoveryها در یک گروه concurrency صف‌بندی می‌شوند.
+7. **Timeout و concurrency:** CI ده دقیقه، Watchdog هشت دقیقه و Recovery سه دقیقه سقف اجرا دارند. CI قدیمی همان ref لغو می‌شود؛ Watchdog و Recovery صف محدود GitHub را استفاده می‌کنند و اجرای فعال را لغو نمی‌کنند.
+8. **گزارش پاک‌سازی‌شده:** فقط وضعیت کلی و شمارنده‌ها ثبت می‌شود. هیچ payload، داده بازار، فایل محلی، Token، Secret یا Artifact بارگذاری نمی‌شود.
+9. **Human handoff:** صف بیش از ۲۰ دقیقه، اجرای بیش از ۲۰ دقیقه، Job فعال بیش از ۱۲ دقیقه، Job صف‌شدهٔ کهنه، Workflow غیرفعال/مفقود، تاریخچهٔ ناقص یا آخرین Schedule ناموفق/قدیمی باعث وضعیت degraded می‌شود.
 
 ## مجوزها
 
 | Workflow | مجوز |
 |---|---|
-| Infrastructure CI | `contents: read` |
-| Watchdog | `contents: read`, `actions: read` |
-| Recovery | فقط `actions: write` در Job محدود |
+| Infrastructure CI | \`contents: read\` |
+| Watchdog | \`contents: read\`, \`actions: read\` |
+| Recovery | فقط \`actions: write\` در Job محدود |
 
-Recovery کد PR را checkout یا اجرا نمی‌کند و Artifactی را دانلود نمی‌کند. Token موقت فقط از طریق محیط اجرا به GitHub CLI داده می‌شود و چاپ یا ذخیره نمی‌شود.
+Checkout با \`persist-credentials: false\` انجام می‌شود. Recovery کد PR را checkout یا اجرا نمی‌کند و Artifactی را دانلود نمی‌کند. Token موقت فقط از طریق محیط اجرا به GitHub CLI داده می‌شود و چاپ یا ذخیره نمی‌شود.
 
 ## هزینه و محدودیت
 
@@ -51,7 +54,7 @@ Recovery کد PR را checkout یا اجرا نمی‌کند و Artifactی را 
 ### صف یا Job گیرکرده
 - ابتدا شناسهٔ اجرا، نام Workflow و مخزن را در صفحهٔ Actions تأیید کنید.
 - فقط اجرای تأییدشدهٔ همین مخزن و همین Workflow را لغو کنید:
-  `gh run cancel <RUN_ID> --repo yarsalam/marketsage`
+  \`gh run cancel <RUN_ID> --repo yarsalam/marketsage\`
 - برای رفع صف هیچ Runner لپ‌تاپی را روشن یا دائمی فرض نکنید.
 
 ### فعال‌سازی و پذیرش
