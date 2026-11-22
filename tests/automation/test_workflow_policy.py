@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
+HEALTH_CHECK = ROOT / "scripts" / "automation" / "health_check.py"
 
 
 class WorkflowPolicyTests(unittest.TestCase):
@@ -16,6 +17,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("timeout-minutes: 10", content)
         self.assertIn("contents: read", content)
         self.assertIn("cancel-in-progress: true", content)
+        self.assertIn("persist-credentials: false", content)
         self.assertNotIn("self-hosted", content)
         self.assertNotIn("upload-artifact", content)
 
@@ -26,6 +28,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("timeout-minutes: 8", content)
         self.assertIn("cancel-in-progress: false", content)
         self.assertIn("queue: max", content)
+        self.assertIn("persist-credentials: false", content)
         self.assertNotIn("self-hosted", content)
         self.assertNotIn("upload-artifact", content)
 
@@ -53,11 +56,19 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("group: marketsage-infra-recovery", content)
         self.assertIn("queue: max", content)
         self.assertIn("cancel-in-progress: false", content)
+
     def test_no_workflow_can_merge_or_deploy(self):
         for path in WORKFLOWS.glob("infra-*.yml"):
             content = path.read_text(encoding="utf-8").lower()
             for forbidden in ("gh pr merge", "deploy", "production", "backtest", "broker", "trading"):
                 self.assertNotIn(forbidden, content, f"forbidden operation in {path.name}")
+
+    def test_health_check_uses_workflow_scoped_bounded_queries(self):
+        content = HEALTH_CHECK.read_text(encoding="utf-8")
+        self.assertIn("/actions/workflows?per_page=", content)
+        self.assertIn("/actions/workflows/{workflow_id}/runs", content)
+        self.assertIn("MAX_RUN_PAGES", content)
+        self.assertNotIn("/actions/runs?per_page=100", content)
 
 
 if __name__ == "__main__":
